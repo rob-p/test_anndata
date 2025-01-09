@@ -1,10 +1,9 @@
-use anndata::data::Element;
-use anndata::{s, AnnData, AnnDataOp, ArrayElemOp, HasShape};
+use anndata::{s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anndata_hdf5::H5;
 use anyhow::Context;
-use sprs::io::{self, read_matrix_market_from_bufread};
+use polars::io::prelude::*;
+use polars::prelude::CsvReadOptions;
 use std::env;
-use std::io::BufRead;
 
 fn main() -> anyhow::Result<()> {
     let root_path = env::args().nth(1).expect("valid arg");
@@ -20,30 +19,21 @@ fn main() -> anyhow::Result<()> {
 
     let mut sw = libsw::Sw::new();
     sw.start()?;
-    /*
-    let a: sprs::CsMat<f64> = sprs::io::read_matrix_market(p).expect("read file").to_csr();
-    println!("loading into CSR took {:#?}", sw.elapsed());
-    sw.reset();
-    sw.start()?;
 
-    let nr = a.rows();
-    let nc = a.cols();
-    let ngenes = nc / 3;
+    let r = anndata::reader::MMReader::from_path(&p)?;
+    let mut col_df = CsvReadOptions::default()
+        .with_has_header(false)
+        .try_into_reader_with_file_path(Some(colpath))?
+        .finish()?;
+    col_df.set_column_names(["gene_symbols"])?;
 
-    // convert to CSR
-    let (iptr, istor, dat) = a.into_raw_storage();
-    let ap = nalgebra_sparse::csr::CsrMatrix::try_from_csr_data(nr, nc, iptr, istor, dat)
-        .expect("csr matrix");
-    eprintln!("CSR to CSR took {:#?}", sw.elapsed());
-
-    sw.reset();
-    sw.start()?;
-    */
-    let r = anndata::reader::MMReader::from_path(&p)?
-        .obs_names(&rowpath)?
-        .var_names(&colpath)?;
+    let mut row_df = CsvReadOptions::default()
+        .with_has_header(false)
+        .try_into_reader_with_file_path(Some(rowpath))?
+        .finish()?;
+    row_df.set_column_names(["barcodes"])?;
     // make  AnnData object
-    let b = anndata::AnnData::<H5>::new("foo.anndata")?;
+    let b = AnnData::<H5>::new("foo.anndata")?;
     r.finish(&b)?;
     eprintln!("Reading MM into AnnData took {:#?}", sw.elapsed());
     sw.reset();
@@ -52,37 +42,25 @@ fn main() -> anyhow::Result<()> {
     let nr = b.n_obs();
     let nc = b.n_vars();
     let ngenes = nc / 3;
-    /*
-    let c = anndata::data::array::DynCsrMatrix::F64(ap);
-    eprintln!("converting to CSR took {:#?}", sw.elapsed());
-    sw.reset();
-    sw.start()?;
-
-    // set the AnnData content
-    b.set_x(c)?;
-    eprintln!("setting in anndata took {:#?}", sw.elapsed());
-    sw.reset();
-    sw.start()?;
-    */
 
     // Get the unspliced, spliced and ambiguous slices
-    let vars = b.read_var().context("should exist")?;
-    eprintln!("vars : {:#?}", vars);
+    let vars = col_df;
+    eprintln!("vars : {:#?}", vars.shape());
 
-    let slice1: anndata::ArrayData = b.get_x().slice(s![.., 0..ngenes])?.unwrap();
-    let var1 = vars.select_by_range(0..ngenes)?;
+    let slice1: ArrayData = b.get_x().slice(s![.., 0..ngenes])?.unwrap();
+    let var1 = vars.slice(0_i64, ngenes);
     eprintln!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
 
-    let slice2: anndata::ArrayData = b.get_x().slice(s![.., ngenes..2 * ngenes])?.unwrap();
-    let var2 = vars.select_by_range(ngenes..2 * ngenes)?;
+    let slice2: ArrayData = b.get_x().slice(s![.., ngenes..2 * ngenes])?.unwrap();
+    let var2 = vars.slice(ngenes as i64, ngenes);
     eprintln!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
 
-    let slice3: anndata::ArrayData = b.get_x().slice(s![.., 2 * ngenes..3 * ngenes])?.unwrap();
-    let var3 = vars.select_by_range(2 * ngenes..3 * ngenes)?;
+    let slice3: ArrayData = b.get_x().slice(s![.., 2 * ngenes..3 * ngenes])?.unwrap();
+    let var3 = vars.slice(2_i64 * ngenes as i64, ngenes);
     eprintln!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
@@ -114,5 +92,6 @@ fn main() -> anyhow::Result<()> {
         .context("unable to set layers for AnnData object")?;
     eprintln!("setting layers took {:#?}", sw.elapsed());
     b.set_varm(varm)?;
+    b.set_obs(row_df)?;
     Ok(())
 }
